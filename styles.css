@@ -1,0 +1,111 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
+.app {
+  max-width: 760px;
+  margin: 24px auto;
+  padding: 0 16px 24px;
+}
+
+h1 {
+  margin-bottom: 4px;
+}
+
+.subtitle {
+  margin-top: 0;
+  color: #94a3b8;
+}
+
+.panel {
+  background: #111827;
+  border: 1px solid #1f2937;
+  border-radius: 10px;
+  padding: 14px;
+  margin-top: 12px;
+}
+
+.drop-zone {
+  display: block;
+  border: 2px dashed #334155;
+  border-radius: 8px;
+  padding: 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 120ms ease;
+}
+
+.drop-zone.drag-over {
+  border-color: #22d3ee;
+}
+
+.file-meta {
+  margin-bottom: 0;
+  color: #93c5fd;
+}
+
+.controls {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+button {
+  border: 0;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+#connect-btn {
+  background: #06b6d4;
+  color: #082f49;
+}
+
+#flash-btn {
+  background: #22c55e;
+  color: #052e16;
+}
+
+#disconnect-btn {
+  background: #f59e0b;
+  color: #451a03;
+}
+
+.status-panel .status-line {
+  margin-bottom: 8px;
+}
+
+progress {
+  width: 100%;
+  height: 16px;
+}
+
+.log-output {
+  min-height: 180px;
+  max-height: 320px;
+  overflow: auto;
+  border-radius: 8px;
+  border: 1px solid #1f2937;
+  background: #020617;
+  padding: 10px;
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.help ol {
+  margin-bottom: 0;
+}

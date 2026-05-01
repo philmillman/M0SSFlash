@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>M0SS-101 Web Flasher</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+
+<body>
+  <main class="app">
+    <h1>M0SS-101 Web Flasher</h1>
+    <p class="subtitle">BL616 single-bin flash utility (Web Serial)</p>
+
+    <section class="panel">
+      <label id="drop-zone" class="drop-zone" for="firmware-input" tabindex="0"
+        aria-label="Drop firmware file here or click to browse">
+        <span id="drop-zone-text">Drop a <code>.bin</code> file here or click to browse</span>
+      </label>
+      <input id="firmware-input" type="file" accept=".bin,application/octet-stream" hidden />
+      <p id="file-meta" class="file-meta">No file selected</p>
+    </section>
+
+    <section class="panel controls">
+      <button id="connect-btn">Connect Serial</button>
+      <button id="flash-btn" disabled>Flash Firmware</button>
+      <button id="disconnect-btn" disabled>Disconnect</button>
+    </section>
+
+    <section class="panel status-panel">
+      <div class="status-line">
+        <strong>Status:</strong>
+        <span id="status-text">Idle</span>
+      </div>
+      <div class="status-line">
+        <strong>Phase:</strong>
+        <span id="phase-text">idle</span>
+      </div>
+      <progress id="progress" value="0" max="100"></progress>
+    </section>
+
+    <section class="panel">
+      <h2>Log</h2>
+      <pre id="log-output" class="log-output"></pre>
+    </section>
+
+    <section class="panel help">
+      <h2>Boot Mode Tips</h2>
+      <ol>
+        <li>Put BL616 into bootloader mode (unplug, hold BOOT, plug back in, release BOOT after > 1 second).</li>
+        <li>Click <em>Connect Serial</em>.</li>
+        <li>Select your firmware file and click <em>Flash Firmware</em>.</li>
+      </ol>
+    </section>
+  </main>
+
+  <script type="module" src="./app.js"></script>
+</body>
+
+</html>
