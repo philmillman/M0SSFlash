@@ -1,6 +1,6 @@
-# M0SS-101 Web Flasher (BL616)
+# M0SS-101/201 Web Flasher (BL616)
 
-Browser-based BL616 flasher for M0SS-101 firmware using Web Serial.
+Browser-based BL616 flasher for M0SS-101/201 firmware using Web Serial.
 
 ## Current status
 
