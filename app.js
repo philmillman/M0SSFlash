@@ -12,6 +12,7 @@ const statusText = document.querySelector("#status-text");
 const phaseText = document.querySelector("#phase-text");
 const progressBar = document.querySelector("#progress");
 const logOutput = document.querySelector("#log-output");
+const eraseFullFlashCheckbox = document.querySelector("#erase-full-flash");
 
 const transport = new SerialTransport();
 const flasher = new Bl616Flasher(transport, { onEvent: onFlasherEvent });
@@ -29,10 +30,26 @@ if (!("serial" in navigator)) {
   );
 }
 
+let logBuffer = "";
+let logFlushScheduled = false;
+
+function flushLogBuffer() {
+  logFlushScheduled = false;
+  if (!logBuffer) {
+    return;
+  }
+  logOutput.textContent += logBuffer;
+  logBuffer = "";
+  logOutput.scrollTop = logOutput.scrollHeight;
+}
+
 function appendLog(message) {
   const ts = new Date().toLocaleTimeString();
-  logOutput.textContent += `[${ts}] ${message}\n`;
-  logOutput.scrollTop = logOutput.scrollHeight;
+  logBuffer += `[${ts}] ${message}\n`;
+  if (!logFlushScheduled) {
+    logFlushScheduled = true;
+    requestAnimationFrame(flushLogBuffer);
+  }
 }
 
 function setStatus(message, level = "info") {
@@ -144,14 +161,18 @@ flashBtn.addEventListener("click", async () => {
     progressBar.value = 0;
     updateButtons();
     setStatus("Flashing...");
-    appendLog(`Starting flash: ${selectedFile.name}`);
-    await flasher.flashSingleBin(selectedFile, selectedBytes);
+    const eraseFullFlash = Boolean(eraseFullFlashCheckbox?.checked);
+    appendLog(
+      `Starting flash: ${selectedFile.name}${eraseFullFlash ? " (full 4 MB erase enabled)" : ""}`
+    );
+    await flasher.flashSingleBin(selectedFile, selectedBytes, { eraseFullFlash });
     setStatus("Flash finished");
     appendLog("Flash complete");
   } catch (error) {
     setStatus(`Flash failed: ${error.message}`, "error");
     appendLog(`ERROR flash: ${error.message}`);
   } finally {
+    flushLogBuffer();
     isBusy = false;
     updateButtons();
   }

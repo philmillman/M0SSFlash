@@ -1,13 +1,34 @@
 const DEFAULT_FLASH_ADDRESS = 0x00000000;
+/** BL616 on-board SPI NOR is 4 MiB in typical M0SS / Bouffalo dev kits. */
+const FLASH_SIZE_4MIB = 4 * 1024 * 1024;
+/** Max time to wait for flash_erase when it returns PD (regional erase). */
+const FLASH_ERASE_PENDING_DEADLINE_MS = 100000;
+/** Full-chip erase can take much longer than a region erase. */
+const FLASH_ERASE_FULL_CHIP_PENDING_DEADLINE_MS = 300000;
 // Tuned stable profile for BL616 + JEDEC c86016 over Web Serial.
+/** Bootrom allows up to 64 B per flash_write payload; Web Serial stays stable at 32 B. */
 const CHUNK_SIZE = 64;
 const MIN_CHUNK_SIZE = 32;
+/**
+ * Field logs: stable runs use 32 B frames + low ms pacing (see MIN_INTER_CHUNK_DELAY_MS).
+ * Starting here avoids 64 B → timeout → recovery churn before the same steady state.
+ */
+const MAX_FLASH_WRITE_CHUNK = 32;
+/** Baseline pause between flash_write frames (Web Serial / bootrom pacing). */
+const DEFAULT_INTER_CHUNK_DELAY_MS = 4;
+const MIN_INTER_CHUNK_DELAY_MS = 3;
+/** Extra pause every 4 KiB — helps Web Serial/CDC after long bursts (do not disable; caused verify SHA mismatch in the wild). */
+const PER_4K_COOLDOWN_MS = 2;
+/** Progress/log emit stride (bytes). Larger = less main-thread log churn during program. */
+const PROGRAM_PROGRESS_STEP_BYTES = 8192;
+/** Ease inter-chunk delay down to this band before trying larger `chunkSize` again (post-timeout delay often lands ~10–12 ms). */
+const CHUNK_RESTORE_MAX_DELAY_MS = DEFAULT_INTER_CHUNK_DELAY_MS + 8;
 const WRITE_ACK_TIMEOUT_NORMAL_MS = 8000;
 const WRITE_RETRIES_NORMAL = 3;
 const WRITE_ACK_TIMEOUT_SMALL_MS = 2500; // <= 64 bytes
-const WRITE_RETRIES_SMALL = 1;
-const WRITE_ACK_TIMEOUT_MIN_MS = 2200; // <= 32 bytes
-const WRITE_RETRIES_MIN = 1;
+const WRITE_RETRIES_SMALL = 2;
+const WRITE_ACK_TIMEOUT_MIN_MS = 3000; // <= 32 bytes
+const WRITE_RETRIES_MIN = 2;
 const BASE_MAX_RECOVERY_ATTEMPTS = 8;
 const MAX_RECOVERY_ATTEMPTS_WITH_PROGRESS = 20;
 const OK_BYTE_1 = 0x4f;
@@ -79,10 +100,12 @@ export class Bl616Flasher {
     }
   }
 
-  async flashSingleBin(file, bytes) {
+  async flashSingleBin(file, bytes, options = {}) {
     if (!this.transport.isOpen) {
       throw new Error("Serial port is not connected");
     }
+
+    const { eraseFullFlash = false } = options;
 
     this.emit(PHASE.PORT_OPEN, "Serial port connected", 0);
     this.recoveryCount = 0;
@@ -92,7 +115,7 @@ export class Bl616Flasher {
     await this.handshakeWithRetry();
     await this.getBootInfo();
     await this.setBootromUartTimeout(10000);
-    await this.programBin(file, bytes, DEFAULT_FLASH_ADDRESS);
+    await this.programBin(file, bytes, DEFAULT_FLASH_ADDRESS, { eraseFullFlash });
     await this.verifyWrite(bytes);
     this.emit(PHASE.SUCCESS, "Flash completed", 100);
   }
@@ -261,7 +284,9 @@ export class Bl616Flasher {
     this.emit(PHASE.HANDSHAKE, `Bootrom UART timeout set to ${timeoutMs}ms`, 19);
   }
 
-  async programBin(file, bytes, startAddress) {
+  async programBin(file, bytes, startAddress, options = {}) {
+    const { eraseFullFlash = false } = options;
+
     this.emit(
       PHASE.PROGRAM,
       `Programming ${file.name} at 0x${startAddress.toString(16).padStart(8, "0")}`,
@@ -270,14 +295,28 @@ export class Bl616Flasher {
 
     await this.setupFlashParameters();
 
+    if (eraseFullFlash) {
+      const fullEnd = FLASH_SIZE_4MIB - 1;
+      this.emit(
+        PHASE.PROGRAM,
+        `Erasing full 4 MiB flash (0x00000000-0x${fullEnd.toString(16)})`,
+        21
+      );
+      await this.flashErase(0, fullEnd, {
+        pendingDeadlineMs: FLASH_ERASE_FULL_CHIP_PENDING_DEADLINE_MS,
+      });
+      this.emit(PHASE.PROGRAM, "Full flash erase complete", 22);
+    }
+
     const endAddress = startAddress + bytes.length - 1;
     this.emit(PHASE.PROGRAM, "Erasing flash region", 22);
     await this.flashErase(startAddress, endAddress);
     this.emit(PHASE.PROGRAM, "Erase complete", 24);
 
     let sent = 0;
-    let chunkSize = CHUNK_SIZE;
-    let interChunkDelayMs = 12;
+    let chunkSize = Math.min(CHUNK_SIZE, MAX_FLASH_WRITE_CHUNK);
+    let interChunkDelayMs = MIN_INTER_CHUNK_DELAY_MS;
+    let writeOkStreak = 0;
     while (sent < bytes.length) {
       const end = Math.min(sent + chunkSize, bytes.length);
       const chunk = bytes.slice(sent, end); // Uint8Array slice
@@ -302,17 +341,31 @@ export class Bl616Flasher {
         });
         sent = end;
         const progress = 20 + Math.round((sent / bytes.length) * 65);
-        if (sent % (chunkSize * 10) === 0 || sent === bytes.length) {
+        if (sent % PROGRAM_PROGRESS_STEP_BYTES === 0 || sent === bytes.length) {
           this.emit(PHASE.PROGRAM, `Wrote ${sent}/${bytes.length} bytes`, progress);
+        }
+        writeOkStreak += 1;
+        // After many clean writes, ease backoff so a transient timeout does not
+        // leave inter-chunk delay pegged high for the rest of the image.
+        const relaxEvery = chunkSize === MIN_CHUNK_SIZE ? 64 : 128;
+        if (writeOkStreak % relaxEvery === 0 && interChunkDelayMs > MIN_INTER_CHUNK_DELAY_MS) {
+          interChunkDelayMs = Math.max(MIN_INTER_CHUNK_DELAY_MS, interChunkDelayMs - 2);
+        }
+        if (
+          writeOkStreak % 256 === 0 &&
+          chunkSize < MAX_FLASH_WRITE_CHUNK &&
+          interChunkDelayMs <= CHUNK_RESTORE_MAX_DELAY_MS
+        ) {
+          chunkSize = Math.min(MAX_FLASH_WRITE_CHUNK, chunkSize * 2);
         }
         // Brief pause between chunks -- the Python tool has natural latency
         // from its serial library; without this, the bootrom can drop frames.
         await sleep(interChunkDelayMs);
-        // Periodic tiny cooldown helps Web Serial/CDC buffering stay stable.
-        if (sent % 4096 === 0) {
-          await sleep(8);
+        if (sent % 4096 === 0 && PER_4K_COOLDOWN_MS > 0) {
+          await sleep(PER_4K_COOLDOWN_MS);
         }
       } catch (error) {
+        writeOkStreak = 0;
         const isReadTimeout =
           typeof error?.message === "string" &&
           error.message.includes("Serial read timeout while waiting for 2 bytes");
@@ -351,6 +404,7 @@ export class Bl616Flasher {
             "warn"
           );
           await this.recoverWriteChannel(sent);
+          await this.setupFlashParameters();
           continue;
         }
         if (isFl0001) {
@@ -361,11 +415,14 @@ export class Bl616Flasher {
             "warn"
           );
           await this.recoverWriteChannel(sent);
+          await this.setupFlashParameters();
           continue;
         }
         throw error;
       }
     }
+
+    await this.transport.drain(800, 180);
 
     await this.sendCommand(0x3a, new Uint8Array(), false, "flash_write_check", {
       ackTimeoutMs: 5000,
@@ -376,6 +433,7 @@ export class Bl616Flasher {
   async verifyWrite(bytes) {
     this.emit(PHASE.VERIFY, "Verifying write", 90);
 
+    await this.transport.drain(800, 180);
     await this.sendCommand(0x60, new Uint8Array(), false, "flash_xip_read_start");
     const shaPayload = this.concatBytes(encodeU32LE(DEFAULT_FLASH_ADDRESS), encodeU32LE(bytes.length));
     const { response } = await this.sendCommand(0x3e, shaPayload, true, "flash_xip_readSha");
@@ -392,14 +450,15 @@ export class Bl616Flasher {
     this.emit(PHASE.VERIFY, "Verify success", 98);
   }
 
-  async flashErase(startAddress, endAddress) {
+  async flashErase(startAddress, endAddress, eraseOptions = {}) {
+    const pendingDeadlineMs = eraseOptions.pendingDeadlineMs ?? FLASH_ERASE_PENDING_DEADLINE_MS;
     const payload = this.concatBytes(encodeU32LE(startAddress), encodeU32LE(endAddress));
     const result = await this.sendCommand(0x30, payload, false, "flash_erase", {
       ackTimeoutMs: 10000,
       retries: 2,
     });
     if (result.status === "PD") {
-      const deadline = Date.now() + 100000;
+      const deadline = Date.now() + pendingDeadlineMs;
       while (Date.now() < deadline) {
         const ack = await this.readAck(3000);
         if (ack === "PD") {

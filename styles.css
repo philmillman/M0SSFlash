@@ -55,6 +55,24 @@ h1 {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+  align-items: center;
+}
+
+.flash-option {
+  flex-basis: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 4px 0 0;
+  font-size: 0.9rem;
+  color: #cbd5e1;
+  cursor: pointer;
+  user-select: none;
+}
+
+.flash-option input {
+  margin-top: 3px;
+  flex-shrink: 0;
 }
 
 button {

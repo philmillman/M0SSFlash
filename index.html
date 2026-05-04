@@ -10,7 +10,7 @@
 
 <body>
   <main class="app">
-    <h1>M0SS-101 Web Flasher</h1>
+    <h1>M0SS-101/201 Web Flasher</h1>
     <p class="subtitle">BL616 single-bin flash utility (Web Serial)</p>
 
     <section class="panel">
@@ -26,6 +26,10 @@
       <button id="connect-btn">Connect Serial</button>
       <button id="flash-btn" disabled>Flash Firmware</button>
       <button id="disconnect-btn" disabled>Disconnect</button>
+      <label class="flash-option">
+        <input id="erase-full-flash" type="checkbox" />
+        <span>Erase full 4 MB flash before programming (slower; clears entire chip)</span>
+      </label>
     </section>
 
     <section class="panel status-panel">
