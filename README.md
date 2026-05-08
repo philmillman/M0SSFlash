@@ -4,7 +4,7 @@ Browser-based BL616 flasher for M0SS-101/201 firmware using Web Serial.
 
 ## Current status
 
-The flasher is now validated on BL616 (`JEDEC c86016`) with end-to-end success, including full write + SHA verify, using a hardened recovery path for intermittent UART/CDC stalls.
+The flasher is now validated on BL616 (`JEDEC c86016`) with end-to-end success, including full write + SHA verify, using a hardened recovery path for intermittent UART/CDC stalls and a buffered serial read transport.
 
 ### Implemented flow
 
@@ -27,13 +27,14 @@ The flasher is now validated on BL616 (`JEDEC c86016`) with end-to-end success, 
 
 - `CHUNK_SIZE = 64`
 - `MIN_CHUNK_SIZE = 32`
+- `MAX_FLASH_WRITE_CHUNK = 256`
 - Write ACK/retry policy:
   - normal chunks: `8000ms`, `3` retries
-  - `<= 64` bytes: `2500ms`, `1` retry
-  - `<= 32` bytes: `2200ms`, `1` retry
+  - `<= 64` bytes: `2500ms`, `2` retries
+  - `<= 32` bytes: `3000ms`, `2` retries
 - Adaptive write fallback:
   - reduce chunk size on instability
-  - increase inter-chunk delay on timeouts
+  - increase inter-chunk delay on timeouts when stale bytes are drained
 - Strict recovery sequence on persistent min-chunk timeout:
   - handshake
   - boot info read
@@ -45,10 +46,18 @@ The flasher is now validated on BL616 (`JEDEC c86016`) with end-to-end success, 
 
 This prevents infinite loops while allowing long flashes that recover intermittently.
 
+`serial.js` / `app.js` transport defaults:
+
+- Default connect baud: `921600`
+- Web Serial port open buffer: `16384`
+- Read path uses a background pump + buffered waiters (single reader, no overlapping `reader.read()` calls)
+
 ## Known behavior
 
-- Intermittent `flash_write` stalls can still occur on Web Serial.
+- Intermittent `flash_write` stalls can still occur on Web Serial at higher throughput settings.
 - Recovery is expected and logged; successful recovery continues from the same offset.
+- `serial.js` now uses a background read pump + internal buffering to avoid overlapping `reader.read()` races.
+- Throughput tuning should be validated per board/cable/host; higher baud and larger chunks can increase retry frequency.
 - If recovery exhausts its attempt budget, user action is required: re-enter BOOT mode and retry.
 
 ## Run locally

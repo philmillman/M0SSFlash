@@ -13,6 +13,7 @@ const phaseText = document.querySelector("#phase-text");
 const progressBar = document.querySelector("#progress");
 const logOutput = document.querySelector("#log-output");
 const eraseFullFlashCheckbox = document.querySelector("#erase-full-flash");
+const DEFAULT_BAUD_RATE = 921600;
 
 const transport = new SerialTransport();
 const flasher = new Bl616Flasher(transport, { onEvent: onFlasherEvent });
@@ -134,8 +135,8 @@ connectBtn.addEventListener("click", async () => {
     isBusy = true;
     updateButtons();
     setStatus("Requesting serial port...");
-    appendLog("Opening serial port at 115200");
-    await transport.requestAndOpen(115200);
+    appendLog(`Opening serial port at ${DEFAULT_BAUD_RATE}`);
+    await transport.requestAndOpen(DEFAULT_BAUD_RATE);
     setStatus("Serial connected");
     appendLog("Serial port connected");
   } catch (error) {

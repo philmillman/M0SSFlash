@@ -12,7 +12,7 @@ export class SerialTransport {
     return Boolean(this.#port && this.#reader && this.#writer);
   }
 
-  async requestAndOpen(baudRate = 115200) {
+  async requestAndOpen(baudRate = 921600) {
     if (!("serial" in navigator)) {
       throw new Error("Web Serial is not supported in this browser");
     }
