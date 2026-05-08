@@ -2,6 +2,8 @@
 
 Browser-based BL616 flasher for M0SS-101/201 firmware using Web Serial.
 
+![screenshot](screenshot.png)
+
 ## Current status
 
 The flasher is now validated on BL616 (`JEDEC c86016`) with end-to-end success, including full write + SHA verify, using a hardened recovery path for intermittent UART/CDC stalls and a buffered serial read transport.
