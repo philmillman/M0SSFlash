@@ -7,13 +7,13 @@ const FLASH_ERASE_PENDING_DEADLINE_MS = 100000;
 const FLASH_ERASE_FULL_CHIP_PENDING_DEADLINE_MS = 300000;
 // Tuned stable profile for BL616 + JEDEC c86016 over Web Serial.
 /** Bootrom allows up to 64 B per flash_write payload; Web Serial stays stable at 32 B. */
-const CHUNK_SIZE = 64;
+const CHUNK_SIZE = 128;
 const MIN_CHUNK_SIZE = 32;
 /**
  * Field logs: stable runs use 32 B frames + low ms pacing (see MIN_INTER_CHUNK_DELAY_MS).
- * Starting here avoids 64 B → timeout → recovery churn before the same steady state.
+ * We now allow probing up to 64 B with adaptive backoff/recovery.
  */
-const MAX_FLASH_WRITE_CHUNK = 32;
+const MAX_FLASH_WRITE_CHUNK = 256;
 /** Baseline pause between flash_write frames (Web Serial / bootrom pacing). */
 const DEFAULT_INTER_CHUNK_DELAY_MS = 4;
 const MIN_INTER_CHUNK_DELAY_MS = 3;
@@ -566,7 +566,7 @@ export class Bl616Flasher {
     if (this.recoveryCount > this.recoveryAttemptLimit) {
       throw new Error(
         `Write recovery exceeded ${this.recoveryAttemptLimit} attempts at offset ${offset}. ` +
-          "Please re-enter BOOT mode and retry flashing."
+        "Please re-enter BOOT mode and retry flashing."
       );
     }
     const doRecoveryAttempt = async () => {
