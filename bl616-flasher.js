@@ -35,6 +35,9 @@ const OK_BYTE_1 = 0x4f;
 const OK_BYTE_2 = 0x4b;
 const PD_BYTE_1 = 0x50;
 const PD_BYTE_2 = 0x44;
+const DEBUG_SERIAL = typeof globalThis?.location?.search === "string"
+  ? globalThis.location.search.includes("debugSerial=1")
+  : false;
 
 const PHASE = {
   IDLE: "idle",
@@ -92,6 +95,7 @@ export class Bl616Flasher {
     this.recoveryCount = 0;
     this.recoveryAttemptLimit = BASE_MAX_RECOVERY_ATTEMPTS;
     this.lastRecoveryOffset = null;
+    this.lastTimeoutDiagnosticOffset = null;
   }
 
   emit(phase, message, progress = null, level = "info") {
@@ -111,6 +115,7 @@ export class Bl616Flasher {
     this.recoveryCount = 0;
     this.recoveryAttemptLimit = BASE_MAX_RECOVERY_ATTEMPTS;
     this.lastRecoveryOffset = null;
+    this.lastTimeoutDiagnosticOffset = null;
     await this.enterBootloaderMode();
     await this.handshakeWithRetry();
     await this.getBootInfo();
@@ -345,6 +350,7 @@ export class Bl616Flasher {
           this.emit(PHASE.PROGRAM, `Wrote ${sent}/${bytes.length} bytes`, progress);
         }
         writeOkStreak += 1;
+        this.lastTimeoutDiagnosticOffset = null;
         // After many clean writes, ease backoff so a transient timeout does not
         // leave inter-chunk delay pegged high for the rest of the image.
         const relaxEvery = chunkSize === MIN_CHUNK_SIZE ? 64 : 128;
@@ -375,14 +381,49 @@ export class Bl616Flasher {
           error.message.includes("FL0001");
 
         if (isReadTimeout) {
-          const drained = await this.transport.drain(600, 160);
+          const drainedStats = await this.transport.drainDetailed(600, 160);
+          const drained = drainedStats.total;
+          this.debugTransport("flash_write timeout", {
+            offset: sent,
+            chunkSize,
+            bufferedAtCatch: this.transport.bufferedLength,
+            ...drainedStats,
+          });
           this.emit(
             PHASE.PROGRAM,
             `Write timeout at offset ${sent}. Backing off (cleared=${drained})`,
             null,
             "warn"
           );
-          interChunkDelayMs = Math.min(40, interChunkDelayMs + 6);
+          if (drained > 0) {
+            interChunkDelayMs = Math.min(40, interChunkDelayMs + 6);
+          }
+
+          if (drained === 0 && this.lastTimeoutDiagnosticOffset !== sent) {
+            this.lastTimeoutDiagnosticOffset = sent;
+            const lateBytes = await this.transport.drainDetailed(180, 70);
+            this.debugTransport("flash_write timeout rescan", {
+              offset: sent,
+              chunkSize,
+              ...lateBytes,
+            });
+            if (lateBytes.total > 0) {
+              this.emit(
+                PHASE.PROGRAM,
+                `Late bytes appeared after timeout at offset ${sent} (cleared=${lateBytes.total}). Retrying same chunk`,
+                null,
+                "warn"
+              );
+            } else {
+              this.emit(
+                PHASE.PROGRAM,
+                `No bytes arrived after timeout at offset ${sent}. Retrying same chunk before backoff`,
+                null,
+                "warn"
+              );
+            }
+            continue;
+          }
         }
 
         if (chunkSize > MIN_CHUNK_SIZE) {
@@ -489,9 +530,26 @@ export class Bl616Flasher {
     while (true) {
       try {
         const frame = this.buildFrame(cmd, payload);
+        this.debugTransport("sendCommand write", {
+          name,
+          cmd: cmd.toString(16).padStart(2, "0"),
+          payloadLength: payload.length,
+          attempt,
+          expectsResponse,
+        });
         await this.transport.writeBytes(frame);
 
+        this.debugTransport("sendCommand ack-wait", {
+          name,
+          ackTimeoutMs,
+          bufferedBeforeAck: this.transport.bufferedLength,
+        });
         let status = await this.readAck(ackTimeoutMs);
+        this.debugTransport("sendCommand ack", {
+          name,
+          status,
+          bufferedAfterAck: this.transport.bufferedLength,
+        });
         if (status !== "OK" && status !== "PD") {
           throw new Error(`${name} failed: ${status}`);
         }
@@ -519,13 +577,29 @@ export class Bl616Flasher {
         await this.transport.drain();
         return { status, response };
       } catch (error) {
+        if (
+          typeof error?.message === "string" &&
+          error.message.includes("Serial read timeout while waiting for 2 bytes")
+        ) {
+          this.debugTransport("sendCommand ack-timeout", {
+            name,
+            attempt,
+            bufferedAtTimeout: this.transport.bufferedLength,
+          });
+        }
         if (attempt >= retries) {
           throw error;
         }
         attempt += 1;
         // Do not sniff with readAvailable() here: it consumes bytes and can
         // desync command framing. Drain stale bytes and report count instead.
-        const drained = await this.transport.drain(400, 120);
+        const drainedStats = await this.transport.drainDetailed(400, 120);
+        const drained = drainedStats.total;
+        this.debugTransport("sendCommand retry-drain", {
+          name,
+          attempt,
+          ...drainedStats,
+        });
         const drainNote = drained > 0 ? ` cleared=${drained}` : " cleared=0";
         this.emit(PHASE.PROGRAM, `${name} retry ${attempt}/${retries}${drainNote}`, null, "warn");
         await sleep(50);
@@ -615,7 +689,15 @@ export class Bl616Flasher {
     // Read exactly 2 bytes for the ACK, matching the reference Python tool's
     // if_deal_ack(). The old scanning approach consumed response data that
     // arrived in the same USB frame as the ACK, corrupting subsequent reads.
+    this.debugTransport("readAck start", {
+      timeoutMs,
+      bufferedBefore: this.transport.bufferedLength,
+    });
     const ack = await this.transport.readExactly(2, timeoutMs);
+    this.debugTransport("readAck bytes", {
+      ack: toHex(ack),
+      bufferedAfter: this.transport.bufferedLength,
+    });
 
     const isOk =
       (ack[0] === OK_BYTE_1 && ack[1] === OK_BYTE_2) ||
@@ -637,6 +719,13 @@ export class Bl616Flasher {
     } catch (_) {
       return `FL(ack=${toHex(ack)})`;
     }
+  }
+
+  debugTransport(message, details = {}) {
+    if (!DEBUG_SERIAL) {
+      return;
+    }
+    console.debug(`[Bl616Flasher] ${message}`, details);
   }
 
   concatBytes(...arrays) {
