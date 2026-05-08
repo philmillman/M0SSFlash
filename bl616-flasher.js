@@ -382,7 +382,9 @@ export class Bl616Flasher {
             null,
             "warn"
           );
-          interChunkDelayMs = Math.min(40, interChunkDelayMs + 6);
+          if (drained > 0) {
+            interChunkDelayMs = Math.min(40, interChunkDelayMs + 6);
+          }
         }
 
         if (chunkSize > MIN_CHUNK_SIZE) {

@@ -3,7 +3,10 @@ export class SerialTransport {
   #reader = null;
   #writer = null;
   #readBuffer = new Uint8Array(0);
-  #pendingRead = null;
+  #readPump = null;
+  #dataWaiters = [];
+  #readError = null;
+  #isClosing = false;
 
   get isOpen() {
     return Boolean(this.#port && this.#reader && this.#writer);
@@ -21,10 +24,14 @@ export class SerialTransport {
       stopBits: 1,
       parity: "none",
       flowControl: "none",
+      bufferSize: 16384,
     });
 
     this.#reader = this.#port.readable.getReader();
     this.#writer = this.#port.writable.getWriter();
+    this.#readError = null;
+    this.#isClosing = false;
+    this.#startReadPump();
   }
 
   async setSignals(signals) {
@@ -46,28 +53,20 @@ export class SerialTransport {
       throw new Error("Serial reader is not available");
     }
 
-    // Reuse a pending read from a prior timeout instead of starting a new one.
-    // Starting a second reader.read() while one is pending queues it behind the
-    // first, causing data delivered to the old promise to be silently lost.
-    if (!this.#pendingRead) {
-      this.#pendingRead = this.#reader.read();
+    this.#throwReadErrorIfAny("readBytes");
+
+    const buffered = this.#takeBuffered();
+    if (buffered.length) {
+      return buffered;
     }
 
-    const timeoutPromise = new Promise((resolve) => {
-      setTimeout(() => resolve({ timeout: true }), timeoutMs);
-    });
-
-    const result = await Promise.race([this.#pendingRead, timeoutPromise]);
-    if (result && result.timeout) {
+    const wokeForData = await this.#waitForData(timeoutMs);
+    if (!wokeForData) {
       return new Uint8Array();
     }
 
-    this.#pendingRead = null;
-
-    if (result.done || !result.value) {
-      return new Uint8Array();
-    }
-    return result.value;
+    this.#throwReadErrorIfAny("readBytes(post-wait)");
+    return this.#takeBuffered();
   }
 
   async readExactly(length, timeoutMs = 1000) {
@@ -80,10 +79,9 @@ export class SerialTransport {
     let total = 0;
 
     if (this.#readBuffer.length) {
-      const take = Math.min(length, this.#readBuffer.length);
-      chunks.push(this.#readBuffer.slice(0, take));
-      total += take;
-      this.#readBuffer = this.#readBuffer.slice(take);
+      const chunk = this.#takeBuffered(length);
+      chunks.push(chunk);
+      total += chunk.length;
       if (total === length) {
         return this.#concatChunks(chunks, length);
       }
@@ -117,26 +115,7 @@ export class SerialTransport {
   }
 
   async readAvailable(timeoutMs = 150) {
-    const chunk = await this.readBytes(timeoutMs);
-    if (!chunk.length) {
-      return this.#drainBuffered();
-    }
-
-    if (!this.#readBuffer.length) {
-      return chunk;
-    }
-
-    const merged = new Uint8Array(this.#readBuffer.length + chunk.length);
-    merged.set(this.#readBuffer, 0);
-    merged.set(chunk, this.#readBuffer.length);
-    this.#readBuffer = new Uint8Array(0);
-    return merged;
-  }
-
-  #drainBuffered() {
-    const data = this.#readBuffer;
-    this.#readBuffer = new Uint8Array(0);
-    return data;
+    return this.readBytes(timeoutMs);
   }
 
   #concatChunks(chunks, totalLength) {
@@ -150,14 +129,17 @@ export class SerialTransport {
   }
 
   async drain(totalMs = 500, quietMs = 120) {
-    // Clear buffered bytes and wait until the line has been quiet for a
-    // short window. A single read timeout does not guarantee no in-flight
+    // Consume buffered bytes first, then wait until the line has been quiet for
+    // a short window. A single read timeout does not guarantee no in-flight
     // bytes are still arriving from USB/CDC.
-    this.#readBuffer = new Uint8Array(0);
-
     const deadline = Date.now() + totalMs;
     let lastDataAt = Date.now();
     let drainedBytes = 0;
+
+    if (this.#readBuffer.length) {
+      drainedBytes += this.#takeBuffered().length;
+      lastDataAt = Date.now();
+    }
 
     while (Date.now() < deadline) {
       const chunk = await this.readBytes(30);
@@ -170,14 +152,12 @@ export class SerialTransport {
         break;
       }
     }
-
-    // Ensure no buffered leftovers remain after draining.
-    this.#readBuffer = new Uint8Array(0);
     return drainedBytes;
   }
 
   async close() {
-    this.#pendingRead = null;
+    this.#isClosing = true;
+    this.#resolveWaiters();
     try {
       if (this.#reader) {
         await this.#reader.cancel();
@@ -191,12 +171,111 @@ export class SerialTransport {
       if (this.#port) {
         await this.#port.close();
       }
+      try {
+        await this.#readPump;
+      } catch (_) {
+        // Ignore background pump failure during close.
+      }
     } finally {
       this.#reader = null;
       this.#writer = null;
       this.#port = null;
       this.#readBuffer = new Uint8Array(0);
-      this.#pendingRead = null;
+      this.#readPump = null;
+      this.#dataWaiters = [];
+      this.#readError = null;
+      this.#isClosing = false;
+    }
+  }
+
+  #startReadPump() {
+    this.#readPump = (async () => {
+      try {
+        while (this.#reader && !this.#isClosing) {
+          const { value, done } = await this.#reader.read();
+          if (done) {
+            break;
+          }
+          if (value?.length) {
+            this.#appendToBuffer(value);
+            this.#resolveWaiters();
+          }
+        }
+      } catch (error) {
+        if (!this.#isClosing) {
+          this.#readError = error;
+        }
+      } finally {
+        this.#resolveWaiters();
+      }
+    })();
+  }
+
+  #appendToBuffer(chunk) {
+    if (!chunk?.length) {
+      return;
+    }
+    if (!this.#readBuffer.length) {
+      this.#readBuffer = chunk;
+      return;
+    }
+    const merged = new Uint8Array(this.#readBuffer.length + chunk.length);
+    merged.set(this.#readBuffer, 0);
+    merged.set(chunk, this.#readBuffer.length);
+    this.#readBuffer = merged;
+  }
+
+  #takeBuffered(maxLength = null) {
+    if (!this.#readBuffer.length) {
+      return new Uint8Array(0);
+    }
+    const take = maxLength == null ? this.#readBuffer.length : Math.min(maxLength, this.#readBuffer.length);
+    const data = this.#readBuffer.slice(0, take);
+    this.#readBuffer = this.#readBuffer.slice(take);
+    return data;
+  }
+
+  #waitForData(timeoutMs) {
+    if (this.#readBuffer.length) {
+      return Promise.resolve(true);
+    }
+    if (this.#readError || this.#isClosing || !this.#reader) {
+      return Promise.resolve(false);
+    }
+    return new Promise((resolve) => {
+      const waiter = {
+        resolve: (hasData) => {
+          if (waiter.timer) {
+            clearTimeout(waiter.timer);
+          }
+          const index = this.#dataWaiters.indexOf(waiter);
+          if (index !== -1) {
+            this.#dataWaiters.splice(index, 1);
+          }
+          resolve(hasData);
+        },
+        timer: null,
+      };
+      waiter.timer = setTimeout(() => waiter.resolve(false), timeoutMs);
+      this.#dataWaiters.push(waiter);
+    });
+  }
+
+  #resolveWaiters() {
+    if (!this.#dataWaiters.length) {
+      return;
+    }
+    const hasData = this.#readBuffer.length > 0;
+    for (const waiter of [...this.#dataWaiters]) {
+      waiter.resolve(hasData);
+    }
+  }
+
+  #throwReadErrorIfAny(context) {
+    if (this.#readError) {
+      const error = this.#readError;
+      this.#readError = null;
+      throw new Error(`Serial read error during ${context}: ${error.message}`);
     }
   }
 }
